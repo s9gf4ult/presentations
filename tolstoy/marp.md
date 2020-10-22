@@ -406,8 +406,6 @@ userMigrations = FirstVersion Proxy Proxy
 
 ## Допустим захотели поменять структуру документа
 
-```haskell
-
 
 
 ---
