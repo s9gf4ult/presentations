@@ -1,3 +1,10 @@
+
+<style>
+  .slide {
+    font-size: 23px !important;
+  }
+</style>
+
 # Какие проблему решаем
 
 * Очень сложный и тупой код с крудами
@@ -5,6 +12,7 @@
 * Остается проблема истории
 * Проблема размазанности логики изменения документов по коду
 * Документы вообще не надо размазывать по таблицам
+* Однако наивный подход с `jsonb` полем не работает. Можем записать и не прочесть после изменения кода.
 
 ---
 
@@ -13,15 +21,11 @@
 * Храним документ `jsonb` полем
 * Документы изменяются чистой функцией `docAction :: Document -> ActionData -> Document`
 * Рядом с документом храним данные для функции `docAction` тоже в виде `jsonb`
-* Используем автоматические миграции с защитой от случайного изменения кода
+* Используем автоматические миграции 
+* Храним в базе метаинформацию о наших документах (как `sqitch`)
 
 ---
 
-<style>
-  .slide {
-    font-size: 20px !important;
-  }
-</style>
 
 ## Схема
 
@@ -50,9 +54,9 @@ CREATE TABLE documents (
 
 ---
 
-## Как работают миграции
+## Немного Хаскеля
 
-Имеем закрытый кайнд `Structure`
+Давайте придумаем такой кайнд
 
 ```haskell
 -- | Kind for describing the structure of the document
@@ -77,12 +81,14 @@ data ProductTree
 
 * Тип с данным кайндом описывает структуру хранимого документа.
 * Используем его для параметризации 2х основных функторов
-* Все суммы и проиведения тегированы
+* Все суммы и проиведения тегированы тайплевел строчками
 
 ---
 
 ### StructureRep
 
+<span style="font-size: 20px">
+  
 ```haskell
 data StructureRep :: Structure -> * where
   StringRep   :: StructureRep StructString
@@ -117,14 +123,27 @@ data ProductTreeRep :: ProductTree -> * where
     -> ProductTreeRep ('Product2 t1 t2)
 ```
 
-* Описывает **структуру** документа (не его содержание)
-* Имеет инстансы `FromJSON`/`ToJSON`
+</span>
+
+---
+
+### class KnownStructure
+
+```haskell
+-- | Materialize any structure type to it's representation
+class KnownStructure (s :: Structure) where
+  structureRep :: StructureRep s
+```
+
+* `StructureRep` это синглтон для `Structure`
+* Для всех `s`, если у нас есть `StructKind s` то для него можем получить значение `StructureRep s`
+* Значение `StructureRep s` тоже сохраняется в базу!
 
 ---
 
 ### StructureValule
 
-<span style="font-size: 75%">
+<span style="font-size: 16px">
 
 ```haskell
 data StructureValue :: Structure -> * where
@@ -172,12 +191,12 @@ data ProductTreeValue :: ProductTree -> * where
 
 </span>
 
-* Описывает **значение** документа
-* Имеет инстансы `FromJSON`/`ToJSON`
 
 ---
 
 ### class Structural
+
+<span style="font-size: 20px">
 
 ```haskell
 class Structural s where
@@ -197,42 +216,152 @@ class Structural s where
   fromStructValue s = to (gFromStructValue s)
 ```
 
-
 * Каждому типу `s` соответстует тип `StructKind s` (да, названия)
-* Если типы `StructKind s1 ~ StructKind s1` значит у нас есть `(fromJSON :: Value -> StructureValue s2) . (toJSON :: StructureValue s1 -> Value) ~ id`
+* Если `StructKind s1 ~ StructKind s2` значит соблюдается
+  *  `(fromJSON :: Value -> StructureValue s2) . (toJSON :: StructureValue s1 -> Value) ~ id`
+  * `structureRep :: StructureRep (StructKind s) == structureRep :: StructureRep (StructKind s2)`
 * Типы данных, которые мы сохраняем в `jsonb` полях имеют инстансы `Structural`
 * Автоматически выводится через `Generic` почти для всех ADT
 
+</span>
+
 ---
 
-### class KnownStructure
+![bg](why.jpg)
+
+### И что дальше?
+
+<span style="font-size: 23px;">
 
 ```haskell
--- | Materialize any structure type to it's representation
-class KnownStructure (s :: Structure) where
-  structureRep :: StructureRep s
+data Rec = Rec
+  { a :: Int
+  , b :: Text
+  } deriving (Eq, Ord, Show, Generic)
+
+instance Structural Rec
+
+> :t Proxy :: Proxy (StructKind Rec)
+Proxy :: Proxy (StructKind Rec)
+  :: Proxy
+       ('StructProduct
+          ('Product2
+             ('Product1 "a" 'StructNumber) ('Product1 "b" 'StructString)))
+
+> BL.putStrLn $ encode (structureRep :: StructureRep (StructKind Rec))
+{"type":"product","tags":{"a":{"type":"number"},"b":{"type":"string"}}}
+
+> BL.putStrLn $ encode $ toStructValue $ Rec 10 "Hello"
+{"a":10,"b":"Hello"}
 ```
 
-* Для всех `s`, если у нас есть `StructKind s` то для него можем получить значение `StructureRep s`
-* Значение `StructureRep s` тоже сохраняется в базу!
+</span>
+
+* Можем получить материализованное представление структуры документа
+* Можем сериализовать документ
+* Сериализованный докумет всегда соответствует описанию его структуры
 
 ---
 
-### Попробуем использовать
+### Суммы
 
-```
-> data A = A { name :: Text } deriving Generic
-> instance Structural A
-> BL.putStrLn $ encode (structureRep :: StructureRep (StructKind A))
+```haskell
+data Sum = S1 Text | S2 Int
+  deriving (Eq, Ord, Show, Generic)
 
-{"type":"product","tags":{"name":{"type":"string"}}}
+instance Structural Sum
 
-> BL.putStrLn $ encode $ toStructValue $ A "Hello"
+> :t Proxy :: Proxy (StructKind Sum)
+Proxy :: Proxy (StructKind Sum)
+  :: Proxy
+       ('StructSum
+          ('Sum2 ('Sum1 "S1" 'StructString) ('Sum1 "S2" 'StructNumber)))
 
-{"name":"Hello"}
+> BL.putStrLn $ encode $ toStructValue $ S1 "Hello"
+{"tag":"S1","value":"Hello"}
+
+> BL.putStrLn $ encode $ toStructValue $ S2 42
+{"tag":"S2","value":42}
 ```
 
 ---
+
+### Более сложный пример
+
+<span style="font-size: 18px;">
+
+```haskell
+module Pet.V0 
+
+data Pet
+  = Dog
+   { name :: Text
+   , age  :: Int }
+  | Croc
+    { name       :: Text
+    , teeth      :: Bool
+    , tailLength :: Scientific }
+  deriving (Eq, Ord, Show, Generic)
+
+instance Structural Pet
+
+module Pet.V1 
+
+data Pet
+  = Dog DogRec
+  | Croc CrocRec
+  deriving (Eq, Ord, Show, Generic)
+
+instance Structural Pet
+
+data DogRec = DogRec
+  { name :: Text
+  , age  :: Int
+  } deriving (Eq, Ord, Show, Generic)
+
+instance Structural DogRec
+
+data CrocRec = CrocRec
+  { name       :: Text
+  , teeth      :: Bool
+  , tailLength :: Scientific }
+  deriving (Eq, Ord, Show, Generic)
+
+instance Structural CrocRec
+```
+</span>
+
+---
+
+![bg](hopa.jpg)
+
+### Хопача
+
+```haskell
+> BL.putStrLn $ encode $ toStructValue $ V0.Dog "Spot" 4
+{"tag":"Dog","value":{"age":4,"name":"Spot"}}
+> BL.putStrLn $ encode $ toStructValue $ V1.Dog $ DogRec "Spot" 4
+{"tag":"Dog","value":{"age":4,"name":"Spot"}}
+```
+Это потому что
+
+```haskell
+> encode (structureRep :: StructureRep  (StructKind V0.Pet)) 
+   == encode (structureRep :: StructureRep (StructKind V1.Pet))
+True
+```
+
+---
+
+### Как можно менять типы?
+
+* Вынос рекорда в отдельный ADT как в примере выше
+* Смена порядка полей в структурах
+* Смена порядка конструкторов в суммах
+
+---
+
+## А что если хочется изменить типы несовместимым образом?
 
 ### На самом деле есть еще одна таблица
 
