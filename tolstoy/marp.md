@@ -290,7 +290,7 @@ Proxy :: Proxy (StructKind Sum)
 
 ### Более сложный пример
 
-<span style="font-size: 18px;">
+#### Было
 
 ```haskell
 module Pet.V0 
@@ -306,7 +306,12 @@ data Pet
   deriving (Eq, Ord, Show, Generic)
 
 instance Structural Pet
+```
 
+---
+
+#### Стало
+```haskell
 module Pet.V1 
 
 data Pet
@@ -331,7 +336,6 @@ data CrocRec = CrocRec
 
 instance Structural CrocRec
 ```
-</span>
 
 ---
 
