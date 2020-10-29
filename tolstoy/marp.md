@@ -650,6 +650,18 @@ data Story doc act = Story
 
 ---
 
+## Сохраним документ текущей версии в базу
+
+```haskell
+Right doc <- runTest p $ newDoc t 
+  (UV0.User Nothing (Email "a@b.com") UV0.Registered) UV0.Init 
+
+[Debug]  INSERT INTO "actions" (document, document_version, action, action_version) VALUES ( '{"email":"a@b.com","status":{"tag":"Registered","value":{}},"name":null}', 0 , '{"tag":"Init","value":{}}', 0 ) RETURNING id, created_at @(main:Tolstoy.DB.Init /home/razor/work/tolstoy/src/Tolstoy/DB/Init.hs:228:57)
+[Debug]  INSERT INTO "documents" (action_id) VALUES ( '361e1d49-0e0f-45bd-8505-59a31df21b6d' ) RETURNING id, created_at @(main:Tolstoy.DB.Init /home/razor/work/tolstoy/src/Tolstoy/DB/Init.hs:235:58)
+```
+
+---
+
 ## Допустим захотели поменять структуру документа
 
 ```haskell
@@ -751,7 +763,7 @@ userMigrations
 ## При старте обновится таблица versions 
 
 ```
-t :: Tolstoy TestMonad _ _ _ <- runTest p $ tolstoyAutoInit 
+t1 :: Tolstoy TestMonad _ _ _ <- runTest p $ tolstoyAutoInit 
   UV1.userMigrations UV1.actionMigrations UV1.userAction tables
 ```
 
@@ -773,20 +785,21 @@ VALUES
 ---
 
 ![bg](wow.jpg)
-## Можно сохранять и читать документы!
+## Теперь мы можем прочесть старый документ
 
-```
-Right doc <- runTest p $ newDoc t (UV1.User Nothing (Email "a@b.com") 
-  UV1.Registered (Just "10101010")) UV1.Init
+```haskell
+Just (Right doc2) <- runTest p $ getDoc t1 
+  (coerce $ doc ^. field @"documentId") 
 ```
 
 ```haskell
-Right doc2 <- runTest p $ getDoc t (doc ^. field @"documentId")
-```
+> doc2 ^. field @"document" 
 
-```haskell
-> doc2 == doc
-True
+User { name = Nothing
+     , email = Email {unEmail = "a@b.com"}
+     , status = Registered
+     , phone = Nothing 
+     }
 ```
 
 ---
