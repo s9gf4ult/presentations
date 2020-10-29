@@ -344,9 +344,11 @@ instance Structural CrocRec
 {"tag":"Dog","value":{"age":4,"name":"Spot"}}
 > BL.putStrLn $ encode $ toStructValue $ V1.Dog $ DogRec "Spot" 4
 {"tag":"Dog","value":{"age":4,"name":"Spot"}}
-> fromStructValue <$> ((decode $ encode $ toStructValue $ V0.Dog "Spot" 4)) :: Maybe V1.Pet
+> fromStructValue <$> ((decode $ encode $ toStructValue $ V0.Dog "Spot" 4)) 
+    :: Maybe V1.Pet
 Just (Dog (DogRec {name = "Spot", age = 4}))
-> fromStructValue <$> ((decode $ encode $ toStructValue $ V0.Croc "Chewie" True 2)) :: Maybe V1.Pet
+> fromStructValue <$> ((decode $ encode $ toStructValue $ V0.Croc "Chewie" True 2))
+    :: Maybe V1.Pet
 Just (Croc (CrocRec {name = "Chewie", teeth = True, tailLength = 2.0}))
 ```
 Это потому что
@@ -749,7 +751,8 @@ userMigrations
 ## При старте обновится таблица versions 
 
 ```
-t :: Tolstoy TestMonad _ _ _ <- runTest p $ tolstoyAutoInit UV1.userMigrations UV1.actionMigrations UV1.userAction tables
+t :: Tolstoy TestMonad _ _ _ <- runTest p $ tolstoyAutoInit 
+  UV1.userMigrations UV1.actionMigrations UV1.userAction tables
 ```
 
 ```sql
