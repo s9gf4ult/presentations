@@ -5,7 +5,7 @@
   }
 </style>
 
-# Какие проблему решаем
+# Какие проблемы решаем
 
 * Очень сложный и тупой код с крудами
   * Да, это частично решается с помощью `pg-schema`
@@ -30,7 +30,7 @@
 ## Схема
 
 ```sql
-CREATE TABLE actions (
+CREATE TABLE revisions (
   id                 uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   created_at         timestamp with time zone DEFAULT NOW() NOT NULL,
   parent_id          uuid REFERENCES ^{actions}(id) UNIQUE,
@@ -45,7 +45,7 @@ CREATE TABLE actions (
 CREATE TABLE documents (
   id                 uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   created_at         timestamp with time zone DEFAULT NOW() NOT NULL,
-  action_id          uuid NOT NULL REFERENCES ^{actions}(id)
+  action_id          uuid NOT NULL REFERENCES revisions(id)
   -- The reference to the latest action of the document. The head of
   -- the liked list formed by the "parent_id" reference in the
   -- "actions" table.
@@ -229,7 +229,7 @@ class Structural s where
 
 ![bg](why.jpg)
 
-### И что дальше?
+### Зачем это все?
 
 <span style="font-size: 23px;">
 
@@ -276,6 +276,8 @@ Proxy :: Proxy (StructKind Sum)
   :: Proxy
        ('StructSum
           ('Sum2 ('Sum1 "S1" 'StructString) ('Sum1 "S2" 'StructNumber)))
+> BL.putStrLn $ encode $ (structureRep :: (StructureRep (StructKind Sum)))
+{"type":"sum","tags":{"S1":{"type":"string"},"S2":{"type":"number"}}}
 
 > BL.putStrLn $ encode $ toStructValue $ S1 "Hello"
 {"tag":"S1","value":"Hello"}
@@ -335,13 +337,17 @@ instance Structural CrocRec
 
 ![bg](hopa.jpg)
 
-### Хопача
+### Хопача. Выкупай
 
 ```haskell
 > BL.putStrLn $ encode $ toStructValue $ V0.Dog "Spot" 4
 {"tag":"Dog","value":{"age":4,"name":"Spot"}}
 > BL.putStrLn $ encode $ toStructValue $ V1.Dog $ DogRec "Spot" 4
 {"tag":"Dog","value":{"age":4,"name":"Spot"}}
+> fromStructValue <$> ((decode $ encode $ toStructValue $ V0.Dog "Spot" 4)) :: Maybe V1.Pet
+Just (Dog (DogRec {name = "Spot", age = 4}))
+> fromStructValue <$> ((decode $ encode $ toStructValue $ V0.Croc "Chewie" True 2)) :: Maybe V1.Pet
+Just (Croc (CrocRec {name = "Chewie", teeth = True, tailLength = 2.0}))
 ```
 Это потому что
 
@@ -402,7 +408,7 @@ CREATE TABLE versions (
 
 ### А откуда мы берем список структур, которые поддерживает наш код?
 
-<span style="font-size: 80%">
+<span style="font-size: 22px">
 
 ```haskell
 data Migrations :: N -> [*] -> * where
@@ -431,16 +437,11 @@ type family Head (els :: [*]) where
 
 </span>
 
-* Два списка миграций, один для документов, второй для действий
-* Можем получить список `[(Integer, Value)]`
-  * Это и есть наш список версий документа, мы его сравниваем с содержимым таблицы `versions`
-* Для любого `s` из списка типов `list` в `Migrations N list` можем получить функцию `migrate :: s -> Head list`
-* Функции миграции над простыми ADT
-* Функции можно ручные, а можно автоматические
-
 ---
 
 ### Ну очевидно же
+
+<span style="font-size: 22px">
 
 ```haskell
 -- | Class of obvious transformations of the structure values between each other
@@ -454,7 +455,7 @@ obviousMigration
 obviousMigration = fromStructValue . obvious . toStructValue
 ```
 
-* `a -> Maybe a` для любого поля продакта или суммы
+* `a -> Maybe a` для любого поля произведения или суммы
 * `a -> Vector a` аналогично
 * Добавление элемента суммы `A | B -> A | B | C`
 * Удаление поля стурктуры `{a: Integer, b: Text, c: Outdated} -> {a: Integer, b: Text}`
@@ -462,6 +463,8 @@ obviousMigration = fromStructValue . obvious . toStructValue
 * Обертка в произведение `Text -> {anyName: Text}`
 * Обертка в сумму `Text -> AnyName Text`
 * Работает рекурсивно
+
+</span>
 
 ---
 
@@ -531,21 +534,282 @@ userMigrations :: Migrations Z '[ User ]
 userMigrations = FirstVersion Proxy Proxy
 ```
 
+--- 
+
+## Init
+
+```haskell
+tolstoyAutoInit
+  :: forall m n doc act a n1 n2 docs acts
+  .  ( MonadPostgres m
+     , MonadPostgres n, MonadThrow n
+     , StructuralJSON doc, StructuralJSON act
+     , HasCallStack
+     , Typeable doc, Typeable act
+     , doc ~ Head docs
+     , act ~ Head acts
+     )
+  => Migrations n1 docs
+  -> Migrations n2 acts
+  -> DocAction doc act a
+  -> TolstoyTables
+  -> n (Tolstoy m doc act a)
+```
+
+```haskell
+let
+    tables = TolstoyTables
+      { documentsTable = "documents"
+      , actionsTable = "actions"
+      , versionsTable = "versions"
+      , doctypeTypeName = "doctype"
+      }
+
+tolstoy <- tolstoyAutoInit userMigrations actionMigrations userAction tables
+```
+
+---
+
+## Tolstoy
+
+```haskell
+data Tolstoy m doc act a = Tolstoy
+  { newDoc
+    :: doc
+    -- ^ Initial state of the doc.
+    -> act
+    -- ^ Initial action. It will not be performed on given doc, only
+    -- written to DB
+    -> m (TolstoyResult (DocDesc doc act))
+  -- ^ Inserts a new document in DB
+  , getDoc
+    :: DocId doc
+    -> m (Maybe (TolstoyResult (DocDesc doc act)))
+  -- ^ Get last version of some object
+  , getDocHistory
+    :: DocId doc
+    -> m (Maybe (TolstoyResult (DocHistory doc act)))
+  -- ^ Get full history of the document
+  , changeDoc
+    :: DocDesc doc act
+    -> act
+    -> m (TolstoyResult ((DocDesc doc act), a))
+  -- ^ Saves changed doc to the DB. Note that it does not check the
+  -- document history consistency from the business logic perspective
+  , listDocuments :: m (TolstoyResult [DocDesc doc act])
+  } deriving (Generic)
+```
+
+---
+
+## DocDesc
+
+```haaskell
+data DocDesc doc act = DocDesc
+  { document        :: !doc
+  , documentId      :: !(DocId doc)
+  , documentVersion :: !Integer
+  -- ^ Original version number before migration
+  , action          :: !act
+  , actionId        :: !(ActId act)
+  , actionVersion   :: !Integer
+  -- ^ Original version number before migration
+  , created         :: !UTCTime
+  , modified        :: !UTCTime
+  } deriving (Eq, Ord, Show, Generic)
+```
+
+---
+
+## DocHistory
+
+```haskell
+data DocHistory doc act = DocHistory
+  { documentId :: !(DocId doc)
+  , created    :: !UTCTime
+  , history    :: !(NonEmpty (Story doc act))
+  -- ^ Story points in reverse order. Head is the last actual version
+  -- and tail is the initial
+  } deriving (Eq, Ord, Show, Generic)
+  
+data Story doc act = Story
+  { document        :: !doc
+  , documentVersion :: !Integer
+  -- ^ Original document version number before migration
+  , action          :: !act
+  , actionId        :: !(ActId act)
+  , actionVersion   :: !Integer
+  -- ^ Original action version number before migration
+  , modified        :: !UTCTime
+  , parentId        :: !(Maybe (ActId act))
+  } deriving (Eq, Ord, Show, Generic)
+ 
+```
+
 ---
 
 ## Допустим захотели поменять структуру документа
 
+```haskell
+data User = User
+  { name   :: Maybe Name
+  , email  :: Email
+  , status :: UserStatus
+  , phone  :: Maybe Text
+  } deriving (Eq, Ord, Show, Generic)
 
+instance Structural User
+```
+
+* Зафейлится при `tolstoyAutoInit`
+** Exception: DatabaseHasIncompatibleMigration ....
+
+---
+
+## Значит надо сделать миграции
+
+```haskell
+data User = User
+  { name   :: Maybe Name
+  , email  :: Email
+  , status :: UserStatus
+  , phone  :: Maybe Text
+  } deriving (Eq, Ord, Show, Generic)
+
+instance Structural User
+
+data UserStatus
+  = Registered
+  | Confirmed
+  | Banned
+  | Blessed
+  deriving (Eq, Ord, Show, Generic)
+
+instance Structural UserStatus
+
+data UserAction
+  = Init
+  | SetName Name
+  | SetEmail Email
+  | Confirm
+  | Ban
+  | Bless
+  | SetPhone Text
+  deriving (Eq, Ord, Show, Generic)
+
+instance Structural UserAction
+```
+
+---
+
+```haskell
+userAction :: PureDocAction User UserAction
+userAction = pureDocAction $ \user -> \case
+  Init         -> return user
+  SetName name -> do
+    checkStatus user
+    return $ user & field @"name" .~ Just name
+  SetEmail e -> do
+    checkStatus user
+    return $ user & field @"email" .~ e
+  Confirm -> do
+    checkStatus user
+    return $ user & field @"status" .~ Confirmed
+  Ban -> return $ user & field @"status" .~ Banned
+  Bless -> do
+    checkStatus user
+    return $ user & field @"status" .~ Blessed
+  SetPhone p -> do
+    unless (T.all C.isDigit p) $ do
+      Left "Phone is invalid"
+    return $ user & field @"phone" .~ Just p
+  where
+    checkStatus user = case status user of
+      Banned -> Left "User is banned"
+      _      -> pure ()
+```
+
+---
+
+## Миграции
+
+```haskell
+actionMigrations :: Migrations (S Z) '[ UserAction, V0.UserAction ]
+actionMigrations
+  = Migrate Proxy obviousMigration
+  $ V0.actionMigrations
+
+userMigrations :: Migrations (S Z) '[ User, V0.User]
+userMigrations
+  = Migrate Proxy obviousMigration
+  $ V0.userMigrations
+```
+---
+
+## При старте обновится таблица versions 
+
+```
+t :: Tolstoy TestMonad _ _ _ <- runTest p $ tolstoyAutoInit UV1.userMigrations UV1.actionMigrations UV1.userAction tables
+```
+
+```sql
+INSERT INTO
+  "versions" (doctype, "version", structure_rep)
+VALUES
+  (
+    'document',
+    1,
+    '{"type":"product","tags":{"email":{"type":"string"},"status":{"type":"sum","tags":{"Banned":{"type":"product","tags":{}},"Blessed":{"type":"product","tags":{}},"Registered":{"type":"product","tags":{}},"Confirmed":{"type":"product","tags":{}}}},"phone":{"argument":{"type":"string"},"type":"optional"},"name":{"argument":{"type":"string"},"type":"optional"}}}'
+  ),
+  (
+    'action',
+    1,
+    '{"type":"sum","tags":{"Confirm":{"type":"product","tags":{}},"Init":{"type":"product","tags":{}},"Ban":{"type":"product","tags":{}},"SetName":{"type":"string"},"Bless":{"type":"product","tags":{}},"SetEmail":{"type":"string"},"SetPhone":{"type":"string"}}}'
+  )
+```  
+---
+
+![bg](wow.jpg)
+## Можно сохранять и читать документы!
+
+```
+Right doc <- runTest p $ newDoc t (UV1.User Nothing (Email "a@b.com") 
+  UV1.Registered (Just "10101010")) UV1.Init
+```
+
+```haskell
+Right doc2 <- runTest p $ getDoc t (doc ^. field @"documentId")
+```
+
+```haskell
+> doc2 == doc
+True
+```
+
+---
+
+# Статус 
+
+* Работают миграции и тесты
+* Интерфейс пока страшный, но можно лучше
+* Нужен рефакторинг
 
 ---
 
 # Что дальше
 
+* `StructureQuery` чтобы 
+  ```haskell
+  data StructureQuery :: Structure -> * where
+    StringExactly :: Text -> StructureQuery 'StructString
+    StringLike :: Text -> StructureQuery 'StructString
+  ...
+  ```
+* Выделить `Structure` в отдельный пакет или типа того
+* Бенчмарки и еще больше тестов
 * Отвязать бэкэнды
-* `StructureQuery`
 
 ---
 
-# Вопросы
 
-![auto 150%](mkay.jpg)
+![center 176%](mkay.jpg)
